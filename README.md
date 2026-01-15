@@ -4,26 +4,37 @@
 
 一个面向终端的工具，可以批量拉取 plaso 云课堂课程的 Day 结构，为每一节课下载 PDF 和视频（自动处理 m3u8→ts→mp4），并生成整齐的本地目录层级。
 
+## ✨ 新特性
+
+- **多分片视频支持** - 自动识别并合并分片录播（a2, a3, a4...）
+- **双存储类型支持** - 兼容 `liveclass`（OSS STS 签名）和 `ossvideo`（直链 auth_key）
+- **时长校验** - 下载完成后自动验证视频时长，显示 ✓/⚠/✗ 状态
+- **下载报告** - `--report` 生成详细的下载状态报告，按课程分类统计
+- **高并发下载** - 默认使用 CPU 核心数 × 4 个并发 worker
+- **错误容忍** - ffmpeg 自动跳过损坏的 TS 片段
+
 ## 环境要求
 
 - Python 3.10 及以上版本
-- 无需 FFmpeg；程序直接按顺序合并 TS 片段。
+- FFmpeg（可选，推荐安装以获得更好的视频兼容性）
+- ffprobe（时长校验需要，通常随 ffmpeg 一起安装）
 
 ## 目录结构
 
 ```
 plaso-downloader/
   README.md
+  Agents.md           # 架构文档
   Makefile
   pyproject.toml
   .env.example
   .cache/
   plaso_downloader/
-    api/
-    downloader/
-    models/
-    utils/
-    main.py
+    api/              # API 封装
+    downloader/       # 下载器
+    models/           # 数据模型
+    utils/            # 工具类
+    main.py           # 入口
 ```
 
 所有源码都在项目根目录下的 `plaso_downloader/` 包内，可直接通过 `python -m plaso_downloader.main` 运行，无需 `pip install -e .`。
@@ -98,6 +109,8 @@ plaso-downloader \
 
 安装完成后会自动注册命令 `plaso-downloader`，也可以使用 `python -m plaso_downloader.main`。
 
+### 查看课程结构
+
 ```bash
 # 查看当前账号的所有课程组
 plaso-downloader --access-token <你的 token> --list-groups
@@ -108,8 +121,12 @@ plaso-downloader --access-token <你的 token> --group-id 3173947 --list-package
 
 # 查看某个 package 下的 Task（Day）
 plaso-downloader --access-token <你的 token> --group-id 3173947 --package-id 67a22138a0ce258eb09d8124 --list-tasks
+```
 
-# 下载指定 group + package（xFileId 可由上一步获取）
+### 下载课程
+
+```bash
+# 下载指定 group + package
 plaso-downloader \
   --access-token <你的 token> \
   --group-id 3173947 \
@@ -117,7 +134,7 @@ plaso-downloader \
   --task-ids 67a359147a935d2e6027652b,67a4a135633f5cf0385b9fcf \
   --download \
   --output-dir downloads \
-  --workers 16 \
+  --workers 64 \
   --max-tasks 5
 
 # 由工具自动登录换取 token，并下载整个 group 所有 package
@@ -127,61 +144,116 @@ plaso-downloader \
   --group-id 3173947 \
   --download \
   --all-packages
+```
 
-# 下载历史课堂视频回放
+### 下载历史课堂回放
 
-除了常规课程包外，现在也可以直接拉取“历史课堂”里已经生成的回放视频。只需提供时间范围即可，工具会调用 `/liveclassgo/api/v1/history/listRecord` 并逐个下载返回的文件：
+除了常规课程包外，现在也可以直接拉取"历史课堂"里已经生成的回放视频。只需提供时间范围即可：
+
+```bash
+# 预览历史记录（带人性化时长显示）
+plaso-downloader \
+  --access-token <你的 token> \
+  --history-from 2025-01-01 \
+  --history-to 2025-12-31
+
+# 输出示例：
+#   - 20250715_1350 数量关系第八课-容斥问题 | duration=2h06m51s (7611s)
+#   - 20250628_1434 资料分析第一课-变化 | duration=2h57m10s (10630s)
+
+# 下载
+plaso-downloader \
+  --access-token <你的 token> \
+  --history-from 2025-01-01 \
+  --history-to 2025-12-31 \
+  --download \
+  --workers 64
+```
+
+下载完成后会自动验证时长：
+```
+✓ Duration OK: 2h06m51s (7612s) | expected 2h06m51s (7611s) | diff +0s (0.0%)
+```
+
+### 生成下载报告
+
+使用 `--report` 参数生成详细的下载状态报告：
 
 ```bash
 plaso-downloader \
   --access-token <你的 token> \
-  --history-from 2025-01-01 \
-  --history-to 2025-01-31 \
-  --download \
-  --history-output history_recordings
+  --history-from 2025-02-01 \
+  --history-to 2025-12-31 \
+  --report
 ```
 
-- `--history-from` / `--history-to` 接受 `YYYY-MM-DD` 格式的日期，闭区间内的所有回放都会列出。
-- 如果不加 `--download`，命令只会打印记录列表；确认无误后再次附带 `--download` 即可真正下载。
-- 默认会把视频保存到 `<OUTPUT_DIR>/history_records/`，也可以通过 `--history-output` 指定单独的根目录。目录下同样会维护 `.download_manifest.json`，避免重复下载。
-- 进入历史模式后无需再传 `--group-id`/`--package-id`，命令会直接退出常规课程流程。
+报告内容包括：
+- **📈 总体统计** - 预期/已下载/缺失数量、完成率、总时长
+- **📚 分类统计** - 按课程类型分类（数量关系、资料分析、判断推理、申论/真题）
+- **❌ 缺失视频** - 未下载的视频列表
+- **⚠️ 时长异常** - 实际时长与预期差异 >5% 的视频
 
-- `--workers` 控制 TS 下载并发数（默认 16）。
-- `--max-tasks` 可选，只下载前 N 个 Day。
-- 默认以预览模式展示匹配到的课程包，只有显式加上 `--download`（或在 `.env` 中设置 `DOWNLOAD=1`）才会真正下载。
-- `--list-tasks` 会列出每个匹配 package 内的 Day 列表；`--task-ids id1,id2` 可只下载/列出特定 Day。
-- `--package-search` 可用于模糊匹配课程包标题；`--package-limit` 可限制下载包数量。
-- 仍然支持旧版 `--course-id + --xfile-id` 组合，方便手工指定某个目录。
-- 若系统安装了 `ffmpeg`，视频会自动 remux 成 `.mp4`；否则保留为 `.ts` 并给出提示。
+示例输出：
+```
+================================================================================
+📊 下载报告 (Download Report)
+================================================================================
+
+📈 总体统计
+----------------------------------------
+| 指标               | 数值          |
+|-------------------|--------------|
+| 预期视频数         |          132 |
+| 已下载数           |          132 |
+| 缺失数             |            0 |
+| 完成率             |       100.0% |
+| 预期总时长         |   93h25m10s |
+| 实际总时长         |   93h25m12s |
+
+📚 分类统计
+----------------------------------------
+  判断推理: 16个视频, 总时长 46h30m00s
+  数量关系: 19个视频, 总时长 49h15m30s
+  资料分析: 13个视频, 总时长 28h45m00s
+  申论/真题: 84个视频, 总时长 72h30m00s
+```
+
+## CLI 参数速查
+
+| 参数 | 说明 |
+|------|------|
+| `--download` | 执行实际下载（默认仅预览） |
+| `--report` | 生成下载状态报告 |
+| `--workers N` | 并发下载数（默认：CPU 核心数 × 4） |
+| `--keep-ts` | 保留 TS 分片文件用于调试 |
+| `--history-from/--history-to` | 历史模式日期范围 (YYYY-MM-DD) |
+| `--history-output` | 历史模式输出目录 |
+| `--max-tasks N` | 最多下载 N 个 Day |
 
 ## 下载目录结构
-
-```
-downloads/
-  Day1 Intro/
-    video_1.mp4
-    pdf_1.pdf
-  Day2 Advanced/
-    video_1.mp4
-    video_2.mp4
-    pdf_1.pdf
-```
-
-每个 Day 会新建独立文件夹，名称沿用课堂标题并自动移除非法字符。视频在合并成功后会删除 `tmp_ts/<视频名>/` 临时 TS 目录，方便重复运行和断点续传。
-
-整体目录结构如下：
 
 ```
 downloads/
   <GroupName>/
     <PackageTitle>/
       Day1 .../
+        video_1.mp4
+        pdf_1.pdf
       Day2 .../
+        video_1.mp4
+        video_2.mp4
+        pdf_1.pdf
+  history_records/
+    .download_manifest.json
+    20250715_1350 数量关系第八课-容斥问题 xxx.mp4
+    20250628_1434 资料分析第一课-变化 xxx.mp4
+    ...
 ```
 
-借助 group -> package -> day 的层级，可以方便地管理多条课程线以及长期课程包。
+每个 Day 会新建独立文件夹，名称沿用课堂标题并自动移除非法字符。视频在合并成功后会删除 `tmp_ts/<视频名>/` 临时 TS 目录（除非指定 `--keep-ts`），方便重复运行和断点续传。
 
-每个 `pdf_X.pdf` 会附带一个 `pdf_X_pages/` 目录，包含服务端转换出的逐页 JPG，便于离线阅读或打印；成功合成 PDF 后会自动清理临时图片。每个 package 目录下还会维护 `.download_manifest.json`，用于记录已下载的资源，下次运行时会自动跳过。
+每个 package 目录下还会维护 `.download_manifest.json`，用于记录已下载的资源，下次运行时会自动跳过。
+
 ## 使用 .env 管理参数（可选）
 
 为了避免每次在命令行里填写长串参数，可以复制 `.env.example` 为 `.env`，并写入常用配置：
@@ -194,8 +266,24 @@ vim .env  # 或使用你熟悉的编辑器
 make run ALL_PACKAGES=1
 ```
 
-如果你习惯在 shell 中 `source .env` 也没问题；Makefile 会在执行时自动加载 `.env`，Python 程序内部也使用 `python-dotenv` 读取该文件。
+常用变量：
 
-常用变量包括 `LOGIN_PHONE`、`LOGIN_PASSWORD`、`GROUP_ID`、`PACKAGE_ID`、`PACKAGE_SEARCH`、`TASK_IDS`、`LIST_TASKS`、`DOWNLOAD` 等；`TOKEN_CACHE` 可以自定义缓存 access-token 的存储路径。
+| 变量 | 说明 |
+|------|------|
+| `LOGIN_PHONE` | 登录手机号 |
+| `LOGIN_PASSWORD` | 登录密码 |
+| `GROUP_ID` | 课程组 ID |
+| `PACKAGE_ID` | 课程包 ID |
+| `DOWNLOAD` | 设为 1 启用下载 |
+| `WORKERS` | 并发数 |
+| `TOKEN_CACHE` | Token 缓存路径 |
 
 > `.env` 中可能包含 access-token 或登录密码等敏感信息，请妥善保管、避免提交到版本控制中。
+
+## 技术架构
+
+详见 [Agents.md](./Agents.md)，包含：
+- API Agent 职责划分
+- 视频存储类型检测逻辑
+- OSS STS 认证流程
+- 多分片下载合并策略

@@ -9,7 +9,7 @@ from ..models import DayEntry, LessonResources, PDFResource, VideoResource
 from ..utils.http_client import HttpClient
 
 CONTENT_PATH = "yxt/servlet/bigDir/getAllContent"
-FILE_CDN_BASE = "https://filecdn.plaso.cn"
+FILE_CDN_BASE = "https://filecdn.plaso.com"
 
 
 class LessonAPI:

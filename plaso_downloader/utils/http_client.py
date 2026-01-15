@@ -44,7 +44,7 @@ class AuthenticationError(Exception):
 class HttpClient:
     """Handles API and CDN requests with proper headers and throttling."""
 
-    def __init__(self, access_token: str, timeout: int = 10) -> None:
+    def __init__(self, access_token: str, timeout: int = 60) -> None:
         self.access_token = access_token
         self.timeout = timeout
         self._api_session = requests.Session()
@@ -93,6 +93,8 @@ class HttpClient:
 
         try:
             response = self._cdn_session.get(url, timeout=self.timeout)
+            if not response.ok:
+                logging.error("CDN fetch failed details: %s", response.text[:1000])  # Log first 1000 chars of error
             response.raise_for_status()
             return response.text
         except requests.RequestException as exc:  # pragma: no cover - network errors

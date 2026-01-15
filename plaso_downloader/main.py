@@ -71,6 +71,161 @@ def _csv_arg(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _format_duration(seconds: int | None) -> str:
+    """Format seconds as HH:MM:SS with original seconds."""
+    if seconds is None:
+        return "unknown"
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}h{m:02d}m{s:02d}s ({seconds}s)"
+    elif m > 0:
+        return f"{m}m{s:02d}s ({seconds}s)"
+    else:
+        return f"{s}s"
+
+
+def _format_hms(seconds: float) -> str:
+    """Format seconds as HH:MM:SS (short form)."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f"{h}h{m:02d}m{s:02d}s"
+    elif m > 0:
+        return f"{m}m{s:02d}s"
+    else:
+        return f"{s}s"
+
+
+def _get_video_duration(filepath: str) -> float | None:
+    """Get video duration using ffprobe."""
+    import subprocess
+    import shutil
+    
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        return None
+    
+    try:
+        result = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+            capture_output=True, text=True, timeout=10
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return None
+
+
+def _generate_download_report(records: list, history_output: str, manifest) -> None:
+    """Generate a detailed download report comparing expected vs actual."""
+    import os
+    from collections import defaultdict
+    
+    print("\n" + "=" * 80)
+    print("📊 下载报告 (Download Report)")
+    print("=" * 80)
+    
+    # Categorize by course type (based on name patterns)
+    categories = defaultdict(list)
+    for record in records:
+        name = record.get("name", "")
+        if "数量关系" in name:
+            categories["数量关系"].append(record)
+        elif "资料分析" in name:
+            categories["资料分析"].append(record)
+        elif "判断推理" in name:
+            categories["判断推理"].append(record)
+        elif "申论" in name or "事业单位" in name or "公考" in name:
+            categories["申论/真题"].append(record)
+        else:
+            categories["其他"].append(record)
+    
+    # Statistics
+    total_expected = len(records)
+    total_downloaded = 0
+    total_missing = 0
+    total_duration_expected = 0
+    total_duration_actual = 0
+    duration_issues = []
+    missing_videos = []
+    
+    for record in records:
+        expected_duration = record.get("duration", 0) or 0
+        total_duration_expected += expected_duration
+        
+        # Check if downloaded
+        record_id = record.get("_id", "")
+        name = record.get("name", "")
+        
+        # Find matching file
+        found_file = None
+        for fid, fpath in manifest._data.items():
+            if record_id in fpath or (name and name in fpath):
+                found_file = fpath
+                break
+        
+        if found_file and os.path.exists(found_file):
+            total_downloaded += 1
+            actual_duration = _get_video_duration(found_file)
+            if actual_duration:
+                total_duration_actual += actual_duration
+                diff_pct = abs(actual_duration - expected_duration) / expected_duration * 100 if expected_duration else 0
+                if diff_pct > 5:
+                    duration_issues.append({
+                        "name": name,
+                        "expected": expected_duration,
+                        "actual": actual_duration,
+                        "diff_pct": diff_pct
+                    })
+        else:
+            total_missing += 1
+            missing_videos.append({
+                "id": record_id,
+                "name": name,
+                "duration": expected_duration
+            })
+    
+    # Print summary
+    print(f"\n📈 总体统计")
+    print("-" * 40)
+    print(f"| 指标               | 数值          |")
+    print(f"|-------------------|--------------|")
+    print(f"| 预期视频数         | {total_expected:>12} |")
+    print(f"| 已下载数           | {total_downloaded:>12} |")
+    print(f"| 缺失数             | {total_missing:>12} |")
+    print(f"| 完成率             | {total_downloaded/total_expected*100:>10.1f}% |")
+    print(f"| 预期总时长         | {_format_hms(total_duration_expected):>12} |")
+    print(f"| 实际总时长         | {_format_hms(total_duration_actual):>12} |")
+    
+    # Print by category
+    print(f"\n📚 分类统计")
+    print("-" * 40)
+    for cat_name, cat_records in sorted(categories.items()):
+        cat_duration = sum(r.get("duration", 0) or 0 for r in cat_records)
+        print(f"  {cat_name}: {len(cat_records)}个视频, 总时长 {_format_hms(cat_duration)}")
+    
+    # Print missing videos
+    if missing_videos:
+        print(f"\n❌ 缺失视频 ({len(missing_videos)}个)")
+        print("-" * 40)
+        for v in missing_videos[:10]:
+            print(f"  - {v['name'][:50]}... | {_format_hms(v['duration'])}")
+        if len(missing_videos) > 10:
+            print(f"  ... 还有 {len(missing_videos) - 10} 个")
+    
+    # Print duration issues
+    if duration_issues:
+        print(f"\n⚠️ 时长异常 ({len(duration_issues)}个)")
+        print("-" * 40)
+        for v in duration_issues[:5]:
+            print(f"  - {v['name'][:40]}... | 预期:{_format_hms(v['expected'])} 实际:{_format_hms(v['actual'])} ({v['diff_pct']:.1f}%)")
+    
+    print("\n" + "=" * 80)
+
+
 def _filter_days_by_ids(days: list[DayEntry], task_ids: list[str] | None) -> list[DayEntry]:
     if not task_ids:
         return days
@@ -143,12 +298,25 @@ def parse_args() -> argparse.Namespace:
         help="Perform actual downloads instead of preview-only output",
     )
     parser.add_argument("--output-dir", default=_env_str("OUTPUT_DIR") or "downloads", help="Directory to store downloaded assets")
-    parser.add_argument("--workers", type=int, default=_env_int("WORKERS") or 1, help="Number of concurrent TS download workers")
+    parser.add_argument("--workers", type=int, default=_env_int("WORKERS") or (os.cpu_count() or 4) * 4, 
+                        help="Number of concurrent TS download workers (default: CPU cores * 4)")
     parser.add_argument(
         "--max-tasks",
         type=int,
         default=_env_int("MAX_TASKS"),
         help="Optional limit for how many Day lessons to process",
+    )
+    parser.add_argument(
+        "--keep-ts",
+        action="store_true",
+        default=_env_bool("KEEP_TS"),
+        help="Keep TS segment files after merge for debugging",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        default=_env_bool("REPORT"),
+        help="Generate a report comparing expected vs downloaded videos",
     )
     token_cache_env = _env_str("TOKEN_CACHE")
     parser.add_argument(
@@ -375,7 +543,7 @@ def main() -> None:
         history_range = _parse_history_range(args)
         if history_range:
             history_api = HistoryAPI(http_client)
-            video_downloader = VideoDownloader(http_client, workers=args.workers)
+            video_downloader = VideoDownloader(http_client, workers=args.workers, keep_ts=args.keep_ts)
             start_ts, end_ts = history_range
             logging.info(
                 "Fetching history recordings from %s to %s",
@@ -403,10 +571,15 @@ def main() -> None:
             logging.info("Found %s history recordings.", len(records))
             for record in records:
                 logging.info(
-                    "  - %s | duration=%ss",
+                    "  - %s | duration=%s",
                     _history_record_label(record),
-                    record.get("duration"),
+                    _format_duration(record.get("duration")),
                 )
+
+            # Generate report if requested
+            if args.report:
+                _generate_download_report(records, history_output, manifest)
+                return
 
             if not args.download:
                 logging.info("Preview complete. Re-run with --download to fetch the recordings.")
@@ -427,7 +600,8 @@ def main() -> None:
                     continue
                 logging.info("Downloading %s ...", _history_record_label(record))
                 try:
-                    video_downloader.download(video, video_filename, file_api)
+                    video_downloader.download(video, video_filename, file_api, 
+                                             expected_duration=record.get("duration"))
                     manifest.mark_downloaded(file_key, video_filename)
                     logging.info("Done %s", os.path.basename(video_filename))
                 except Exception as exc:
@@ -530,7 +704,7 @@ def main() -> None:
 
         group_name = group_info.name if group_info else f"group_{args.group_id}"
 
-        video_downloader = VideoDownloader(http_client, workers=args.workers)
+        video_downloader = VideoDownloader(http_client, workers=args.workers, keep_ts=args.keep_ts)
         pdf_downloader = PDFDownloader(http_client)
 
         for package in packages:

@@ -53,7 +53,7 @@ class PDFDownloader:
             location_path = file_info.get("locationPath")
             location = file_info.get("location")
             if location_path and location:
-                download_url = f"https://filecdn.plaso.cn/{location_path}/{location}"
+                download_url = f"https://filecdn.plaso.com/{location_path}/{location}"
         for attempt in range(1, attempts + 1):
             try:
                 if not download_url:
@@ -88,7 +88,7 @@ class PDFDownloader:
         image_files: List[str] = []
         logging.info("Downloading %s PDF pages for %s", total_pages, resource.name)
         for page in range(1, total_pages + 1):
-            page_url = f"https://filecdn.plaso.cn/teaching/{pdf_location}/{page}.jpg"
+            page_url = f"https://filecdn.plaso.com/teaching/{pdf_location}/{page}.jpg"
             page_file = os.path.join(pages_directory, f"page_{page:03d}.jpg")
             if os.path.exists(page_file):
                 image_files.append(page_file)
