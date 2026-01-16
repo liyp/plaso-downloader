@@ -226,6 +226,172 @@ def _generate_download_report(records: list, history_output: str, manifest) -> N
     print("\n" + "=" * 80)
 
 
+def _generate_package_report(
+    packages: list,
+    course_api,
+    lesson_api,
+    args,
+    output_dir: str,
+    group_name: str
+) -> None:
+    """Generate a detailed download report for course packages."""
+    from collections import defaultdict
+    
+    print("\n" + "=" * 80)
+    print("📊 课程包下载报告 (Package Download Report)")
+    print("=" * 80)
+    
+    total_videos = 0
+    total_pdfs = 0
+    total_downloaded_videos = 0
+    total_downloaded_pdfs = 0
+    total_duration_expected = 0
+    total_duration_actual = 0
+    missing_files = []
+    duration_issues = []
+    
+    for package in packages:
+        print(f"\n📦 {package.title}")
+        print("-" * 40)
+        
+        try:
+            days = course_api.get_days(package.dir_id, package.group_id, package.xfile_id)
+        except Exception as exc:
+            print(f"  ❌ 无法获取课程列表: {exc}")
+            continue
+        
+        days = _filter_days_by_ids(days, args.task_ids)
+        
+        package_dir = build_package_directory(output_dir, group_name, package.title)
+        manifest = DownloadManifest(os.path.join(package_dir, ".download_manifest.json"))
+        
+        pkg_videos = 0
+        pkg_pdfs = 0
+        pkg_downloaded = 0
+        
+        for day in days:
+            try:
+                entries = lesson_api.list_files(day, package.group_id, package.xfile_id)
+            except Exception:
+                continue
+            
+            day_dir = build_day_directory(package_dir, day.name)
+            
+            # Get list of files in day directory for matching
+            existing_files = []
+            if os.path.isdir(day_dir):
+                existing_files = os.listdir(day_dir)
+            
+            for entry in entries:
+                file_type = entry.get("type")
+                file_name = entry.get("name", "")
+                file_id = entry.get("_id") or entry.get("myid")
+                duration = entry.get("duration", 0) or 0
+                
+                if file_type == 7:  # Video
+                    total_videos += 1
+                    pkg_videos += 1
+                    total_duration_expected += duration
+                    
+                    # Check if downloaded - look for .mp4 file with matching name
+                    found = False
+                    found_path = None
+                    base_name = os.path.splitext(file_name)[0] if file_name else ""
+                    
+                    for f in existing_files:
+                        if f.endswith('.mp4'):
+                            # Check if file name matches (fuzzy match)
+                            if base_name and base_name[:20] in f:
+                                found = True
+                                found_path = os.path.join(day_dir, f)
+                                break
+                    
+                    if found and found_path:
+                        pkg_downloaded += 1
+                        total_downloaded_videos += 1
+                        # Check duration
+                        actual_dur = _get_video_duration(found_path)
+                        if actual_dur:
+                            total_duration_actual += actual_dur
+                            if duration and abs(actual_dur - duration) / duration * 100 > 5:
+                                duration_issues.append({
+                                    "name": file_name,
+                                    "expected": duration,
+                                    "actual": actual_dur
+                                })
+                    else:
+                        missing_files.append({
+                            "type": "video",
+                            "name": file_name,
+                            "day": day.name,
+                            "duration": duration
+                        })
+                        
+                elif file_type == 1:  # PDF
+                    total_pdfs += 1
+                    pkg_pdfs += 1
+                    
+                    # Check if downloaded - look for .pdf file with matching name
+                    found = False
+                    base_name = os.path.splitext(file_name)[0] if file_name else ""
+                    
+                    for f in existing_files:
+                        if f.endswith('.pdf'):
+                            if base_name and base_name[:20] in f:
+                                found = True
+                                break
+                    
+                    if found:
+                        total_downloaded_pdfs += 1
+                    else:
+                        missing_files.append({
+                            "type": "pdf",
+                            "name": file_name,
+                            "day": day.name,
+                            "duration": 0
+                        })
+        
+        print(f"  📹 视频: {pkg_downloaded}/{pkg_videos} 已下载")
+        print(f"  📄 PDF: {pkg_pdfs}个")
+    
+    # Summary
+    print(f"\n📈 总体统计")
+    print("-" * 40)
+    print(f"| 指标               | 数值          |")
+    print(f"|-------------------|--------------|")
+    print(f"| 视频总数           | {total_videos:>12} |")
+    print(f"| 已下载视频         | {total_downloaded_videos:>12} |")
+    print(f"| PDF 总数          | {total_pdfs:>12} |")
+    print(f"| 已下载 PDF        | {total_downloaded_pdfs:>12} |")
+    total_files = total_videos + total_pdfs
+    total_downloaded = total_downloaded_videos + total_downloaded_pdfs
+    if total_files > 0:
+        print(f"| 完成率             | {total_downloaded/total_files*100:>10.1f}% |")
+    print(f"| 预期总时长         | {_format_hms(total_duration_expected):>12} |")
+    print(f"| 实际总时长         | {_format_hms(total_duration_actual):>12} |")
+    
+    # Missing files
+    missing_videos = [f for f in missing_files if f["type"] == "video"]
+    missing_pdfs = [f for f in missing_files if f["type"] == "pdf"]
+    
+    if missing_videos:
+        print(f"\n❌ 缺失视频 ({len(missing_videos)}个)")
+        print("-" * 40)
+        for v in missing_videos[:10]:
+            print(f"  - [{v['day'][:15]}] {v['name'][:40]}...")
+        if len(missing_videos) > 10:
+            print(f"  ... 还有 {len(missing_videos) - 10} 个")
+    
+    if duration_issues:
+        print(f"\n⚠️ 时长异常 ({len(duration_issues)}个)")
+        print("-" * 40)
+        for v in duration_issues[:5]:
+            diff_pct = abs(v['actual'] - v['expected']) / v['expected'] * 100 if v['expected'] else 0
+            print(f"  - {v['name'][:40]}... | {diff_pct:.1f}%偏差")
+    
+    print("\n" + "=" * 80)
+
+
 def _filter_days_by_ids(days: list[DayEntry], task_ids: list[str] | None) -> list[DayEntry]:
     if not task_ids:
         return days
@@ -679,10 +845,25 @@ def main() -> None:
                     logging.info("  Day%02d %s (%s)", idx, day.name, day.id)
                     if args.list_files:
                         _list_task_files(lesson_api, day, package.group_id, package.xfile_id)
-            if not args.list_tasks and not args.download:
+            if not args.list_tasks and not args.download and not args.report:
                 return
-            if args.list_tasks and not args.download:
+            if args.list_tasks and not args.download and not args.report:
                 return
+
+        # Generate report if requested (for package mode)
+        if args.report:
+            # Get group name for proper directory paths
+            group_info = None
+            try:
+                for group in group_api.get_groups():
+                    if group.id == args.group_id:
+                        group_info = group
+                        break
+            except Exception:
+                pass
+            group_name = group_info.name if group_info else f"group_{args.group_id}"
+            _generate_package_report(packages, course_api, lesson_api, args, args.output_dir, group_name)
+            return
 
         if not args.download:
             logging.info("Preview mode: matching packages listed below. Use --download to fetch resources.")
